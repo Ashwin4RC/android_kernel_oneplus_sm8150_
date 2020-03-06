@@ -77,15 +77,6 @@ struct pm_qos_request pm_qos_req_vb;
 /* add haptic audio tp mask */
 extern struct shake_point record_point[10];
 /* add haptic audio tp mask end */
-
-#ifdef CONFIG_HAPTIC_FEEDBACK_DISABLE
-int ignore_next_request = 0;
-void hap_ignore_next_request(void)
-{
-    ignore_next_request = 1;
-}
-#endif
-
 /******************************************************
  *
  * variable
@@ -787,20 +778,9 @@ static int aw8697_haptic_set_bst_peak_cur(struct aw8697 *aw8697, unsigned char p
     return 0;
 }
 
-static unsigned char aw8697_haptic_set_level(struct aw8697 *aw8697, int gain)
-{
-    int val = 80;
-
-    val = aw8697->level * gain / 3;
-    if (val > 255)
-        val = 255;
-
-    return val;
-}
-
 static int aw8697_haptic_set_gain(struct aw8697 *aw8697, unsigned char gain)
 {
-    aw8697_i2c_write(aw8697, AW8697_REG_DATDBG, aw8697_haptic_set_level(aw8697, gain));
+    aw8697_i2c_write(aw8697, AW8697_REG_DATDBG, gain);
     return 0;
 }
 
@@ -2862,7 +2842,6 @@ static int aw8697_haptic_init(struct aw8697 *aw8697)
     aw8697->activate_mode = AW8697_HAPTIC_ACTIVATE_RAM_MODE;
     aw8697_haptic_set_wav_loop(aw8697, aw8697->loop[0x00], 0xff);
     aw8697_haptic_set_bst_vol(aw8697, 0x11);
-    aw8697->level = 3;
     if (check_factory_mode())
        aw8697_haptic_set_gain(aw8697, 0xcf);
     else
@@ -3323,55 +3302,6 @@ static ssize_t aw8697_gain_store(struct device *dev,
     val_pre = val;
     mutex_lock(&aw8697->lock);
     aw8697->gain = val;
-    aw8697_haptic_set_gain(aw8697, aw8697->gain);
-    mutex_unlock(&aw8697->lock);
-    return count;
-}
-
-static ssize_t aw8697_level_show(struct device *dev,
-        struct device_attribute *attr, char *buf)
-{
-#ifdef TIMED_OUTPUT
-    struct timed_output_dev *to_dev = dev_get_drvdata(dev);
-    struct aw8697 *aw8697 = container_of(to_dev, struct aw8697, to_dev);
-#else
-    struct led_classdev *cdev = dev_get_drvdata(dev);
-    struct aw8697 *aw8697 = container_of(cdev, struct aw8697, cdev);
-#endif
-
-    return snprintf(buf, PAGE_SIZE, "%d\n", aw8697->level);
-}
-
-static ssize_t aw8697_level_store(struct device *dev,
-        struct device_attribute *attr, const char *buf, size_t count)
-{
-#ifdef TIMED_OUTPUT
-    struct timed_output_dev *to_dev = dev_get_drvdata(dev);
-    struct aw8697 *aw8697 = container_of(to_dev, struct aw8697, to_dev);
-#else
-    struct led_classdev *cdev = dev_get_drvdata(dev);
-    struct aw8697 *aw8697 = container_of(cdev, struct aw8697, cdev);
-#endif
-    unsigned int val = 0;
-    int rc = 0;
-
-    rc = kstrtouint(buf, 0, &val);
-    if (rc < 0)
-        return rc;
-
-    if (val < 0 || val > 10)
-        val = 3;
-
-#ifdef CONFIG_HAPTIC_FEEDBACK_DISABLE
-    if ((ignore_next_request) && (val != 0)) {
-       ignore_next_request = 0;
-       return count;
-    }
-#endif
-
-    pr_info("%s: value=%d\n", __FUNCTION__, val);
-    mutex_lock(&aw8697->lock);
-    aw8697->level = val;
     aw8697_haptic_set_gain(aw8697, aw8697->gain);
     mutex_unlock(&aw8697->lock);
     return count;
@@ -5045,7 +4975,6 @@ static DEVICE_ATTR(activate_mode, S_IWUSR | S_IRUGO, aw8697_activate_mode_show, 
 static DEVICE_ATTR(index, S_IWUSR | S_IRUGO, aw8697_index_show, aw8697_index_store);
 static DEVICE_ATTR(vmax, S_IWUSR | S_IRUGO, aw8697_vmax_show, aw8697_vmax_store);
 static DEVICE_ATTR(gain, S_IWUSR | S_IRUGO, aw8697_gain_show, aw8697_gain_store);
-static DEVICE_ATTR(level, S_IWUSR | S_IRUGO, aw8697_level_show, aw8697_level_store);
 static DEVICE_ATTR(seq, S_IWUSR | S_IRUGO, aw8697_seq_show, aw8697_seq_store);
 static DEVICE_ATTR(loop, S_IWUSR | S_IRUGO, aw8697_loop_show, aw8697_loop_store);
 static DEVICE_ATTR(register, S_IWUSR | S_IRUGO, aw8697_reg_show, aw8697_reg_store);
@@ -5085,7 +5014,6 @@ static struct attribute *aw8697_vibrator_attributes[] = {
     &dev_attr_index.attr,
     &dev_attr_vmax.attr,
     &dev_attr_gain.attr,
-    &dev_attr_level.attr,
     &dev_attr_seq.attr,
     &dev_attr_loop.attr,
     &dev_attr_register.attr,
@@ -5170,30 +5098,6 @@ static void aw8697_vibrator_work_routine(struct work_struct *work)
                   HRTIMER_MODE_REL);
     }
     mutex_unlock(&aw8697->lock);
-}
-
-void set_vibrate(void)
-{
-    int rtp_is_going_on = 0;
-
-    rtp_is_going_on = aw8697_haptic_juge_RTP_is_going_on(g_aw8697);
-    if (rtp_is_going_on)
-       return;
-    if (!g_aw8697->ram_init)
-       return;
-
-    mutex_lock(&g_aw8697->lock);
-    g_aw8697->activate_mode = AW8697_HAPTIC_ACTIVATE_RAM_MODE;
-    g_aw8697->index = 10;/*sine 170hz*/
-    g_aw8697->duration = 30;
-    aw8697_haptic_set_repeat_wav_seq(g_aw8697, g_aw8697->index);
-
-    hrtimer_cancel(&g_aw8697->timer);
-
-    g_aw8697->state = 1;
-    mutex_unlock(&g_aw8697->lock);
-    schedule_work(&g_aw8697->vibrator_work);
-
 }
 
 static int aw8697_vibrator_init(struct aw8697 *aw8697)
